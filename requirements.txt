@@ -1,0 +1,7 @@
+streamlit
+pandas
+Pillow
+passlib
+argon2-cffi
+streamlit-calendar
+altair

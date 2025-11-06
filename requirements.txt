@@ -3,3 +3,4 @@ pandas
 Pillow
 passlib
 argon2-cffi
+PyDrive2

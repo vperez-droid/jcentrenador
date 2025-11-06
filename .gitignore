@@ -1,15 +1,16 @@
-# Archivos de entorno virtual de Python
+# Entornos virtuales de Python
 venv/
 .venv/
 __pycache__/
+env/
 
-# Bases de datos locales
+# Base de datos local
+# Esto asegura que el archivo .db no se suba al repositorio
+database/
 *.db
 *.sqlite3
 
-# Archivos de configuración de IDEs
+# Archivos de configuración de IDEs y sistemas operativos
 .vscode/
 .idea/
-
-# Archivos generados por Streamlit
-.streamlit/
+.DS_Store

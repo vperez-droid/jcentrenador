@@ -54,7 +54,8 @@ with col2:
     try:
         # La imagen se carga desde la carpeta 'assets'
         image = Image.open('assets/jct.jpeg')
-        st.image(image, use_column_width=True)
+        # Hemos cambiado 'use_column_width=True' por un ancho fijo en píxeles
+        st.image(image, width=250) 
     except FileNotFoundError:
         st.error("No se encontró el logo 'assets/jct.jpeg'. Asegúrate de que la carpeta y el archivo existan.")
 

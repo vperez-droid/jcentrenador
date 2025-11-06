@@ -21,7 +21,8 @@ DB_DIR = "database"
 DB_PATH = os.path.join(DB_DIR, "jct_main.db")
 
 def init_db():
-    """Inicializa la DB y crea las tablas de usuarios y entrenamientos."""
+    """Inicializa la DB y crea las tablas de usuarios y entrenamientos.
+    Es seguro llamar a esta función en cada ejecución."""
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -38,7 +39,7 @@ def init_db():
         );
     ''')
     
-    # --- NUEVA TABLA PARA ENTRENAMIENTOS ---
+    # Tabla de Entrenamientos
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS entrenamientos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,7 +101,6 @@ def page_inicio():
     c1, c2, c3, c4 = st.columns(4, gap="large")
     c1.button("👤 Registrar Cliente", use_container_width=True, on_click=set_page, args=['registrar'])
     c2.button("📋 Ver Clientes", use_container_width=True, on_click=set_page, args=['ver_clientes'])
-    # --- NUEVO BOTÓN PARA CREAR ENTRENAMIENTO ---
     c3.button("💪 Crear Entrenamiento", use_container_width=True, on_click=set_page, args=['crear_entrenamiento'])
     c4.button("📊 Centro de Control", use_container_width=True, on_click=set_page, args=['centro_control'])
 
@@ -151,7 +151,6 @@ def page_ver_clientes():
         if not clientes_df.empty:
             st.dataframe(clientes_df, use_container_width=True, hide_index=True)
             
-            # --- NUEVO: Ver entrenamientos de un cliente ---
             st.subheader("Ver Entrenamientos por Cliente")
             cliente_seleccionado = st.selectbox("Elige un cliente para ver sus entrenamientos", options=clientes_df['nombre'], index=None, placeholder="Selecciona...")
             
@@ -170,10 +169,9 @@ def page_ver_clientes():
     except Exception as e:
         st.error(f"No se pudo cargar la lista de clientes: {e}")
 
-# --- PÁGINA PARA CREAR ENTRENAMIENTO (NUEVA) ---
+# --- PÁGINA PARA CREAR ENTRENAMIENTO ---
 def page_crear_entrenamiento():
     if st.button("⬅️ Volver al inicio"):
-        # Limpiar estado del asistente al volver
         for key in st.session_state.keys():
             if key.startswith('wizard_'):
                 del st.session_state[key]
@@ -182,12 +180,11 @@ def page_crear_entrenamiento():
 
     st.title("💪 Creador de Sesiones de Entrenamiento")
 
-    # Inicializar el estado del asistente
     if 'wizard_step' not in st.session_state:
         st.session_state.wizard_step = 1
         st.session_state.wizard_data = {}
 
-    # --- PASO 1: SELECCIONAR CLIENTE Y FECHA ---
+    # PASO 1: SELECCIONAR CLIENTE Y FECHA
     if st.session_state.wizard_step == 1:
         st.subheader("Paso 1: Datos Generales")
         conn = get_db_connection()
@@ -203,7 +200,7 @@ def page_crear_entrenamiento():
 
         col1, col2 = st.columns(2)
         with col1:
-            st.session_state.wizard_data['fecha_creacion'] = st.date_input("Fecha de la sesión")
+            st.session_state.wizard_data['fecha_creacion'] = st.date_input("Fecha de la sesión", datetime.date.today())
         with col2:
             st.session_state.wizard_data['dia_semana'] = st.text_input("Día de la semana (Ej: LUNES 6)")
 
@@ -211,33 +208,29 @@ def page_crear_entrenamiento():
             st.session_state.wizard_step = 2
             st.rerun()
 
-    # --- PASO 2: DEFINIR SECCIONES DEL ENTRENAMIENTO ---
+    # PASO 2: DEFINIR SECCIONES DEL ENTRENAMIENTO
     elif st.session_state.wizard_step == 2:
         st.subheader("Paso 2: Contenido de la Sesión")
         
-        with st.container(border=True):
-            st.session_state.wizard_data['objetivo_sesion'] = st.text_area("🎯 Objetivo de la Sesión", height=100)
+        # Usamos los datos guardados para rellenar los campos si el usuario vuelve atrás
+        data = st.session_state.wizard_data
         
         with st.container(border=True):
-             # Usamos \n para separar los items en la base de datos
-            st.session_state.wizard_data['warmup_general'] = st.text_area("Warm-Up General (un item por línea)", height=150)
-        
+            data['objetivo_sesion'] = st.text_area("🎯 Objetivo de la Sesión", value=data.get('objetivo_sesion', ''), height=100)
         with st.container(border=True):
-            st.session_state.wizard_data['specific_warmup'] = st.text_area("Specific Warm-Up", height=100)
+            data['warmup_general'] = st.text_area("Warm-Up General (un item por línea)", value=data.get('warmup_general', ''), height=150)
+        with st.container(border=True):
+            data['specific_warmup'] = st.text_area("Specific Warm-Up", value=data.get('specific_warmup', ''), height=100)
+        with st.container(border=True):
+            data['fuerza'] = st.text_area("🏋️ Weightlifting / Strength (un item por línea)", value=data.get('fuerza', ''), height=150)
+        with st.container(border=True):
+            data['trabajo_especifico'] = st.text_area("⚡ Trabajo Específico (EMOM, etc.)", value=data.get('trabajo_especifico', ''), height=150)
+        with st.container(border=True):
+            data['conditioning'] = st.text_area("🏃 Conditioning (un item por línea)", value=data.get('conditioning', ''), height=150)
+        with st.container(border=True):
+            data['anotaciones_coach'] = st.text_area("📝 Anotaciones del Coach", value=data.get('anotaciones_coach', ''), height=100)
 
-        with st.container(border=True):
-            st.session_state.wizard_data['fuerza'] = st.text_area("🏋️ Weightlifting / Strength (un item por línea)", height=150)
-            
-        with st.container(border=True):
-            st.session_state.wizard_data['trabajo_especifico'] = st.text_area("⚡ Trabajo Específico (EMOM, etc.)", height=150)
-            
-        with st.container(border=True):
-            st.session_state.wizard_data['conditioning'] = st.text_area("🏃 Conditioning (un item por línea)", height=150)
-            
-        with st.container(border=True):
-            st.session_state.wizard_data['anotaciones_coach'] = st.text_area("📝 Anotaciones del Coach", height=100)
-
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns([1, 1])
         with col1:
             if st.button("⬅️ Anterior"):
                 st.session_state.wizard_step = 1
@@ -246,7 +239,6 @@ def page_crear_entrenamiento():
             if st.button("💾 Guardar Entrenamiento"):
                 try:
                     conn = get_db_connection()
-                    data = st.session_state.wizard_data
                     cursor = conn.cursor()
                     cursor.execute(
                         """
@@ -254,15 +246,9 @@ def page_crear_entrenamiento():
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            data.get('user_id'),
-                            data.get('fecha_creacion').isoformat(),
-                            data.get('dia_semana'),
-                            data.get('objetivo_sesion'),
-                            data.get('warmup_general'),
-                            data.get('specific_warmup'),
-                            data.get('fuerza'),
-                            data.get('trabajo_especifico'),
-                            data.get('conditioning'),
+                            data.get('user_id'), data.get('fecha_creacion').isoformat(), data.get('dia_semana'),
+                            data.get('objetivo_sesion'), data.get('warmup_general'), data.get('specific_warmup'),
+                            data.get('fuerza'), data.get('trabajo_especifico'), data.get('conditioning'),
                             data.get('anotaciones_coach')
                         )
                     )
@@ -270,16 +256,13 @@ def page_crear_entrenamiento():
                     conn.close()
                     st.success("¡Entrenamiento guardado con éxito!")
                     
-                    # Limpiar estado y volver al inicio
                     for key in st.session_state.keys():
                         if key.startswith('wizard_'):
                             del st.session_state[key]
                     set_page('inicio')
                     st.rerun()
-
                 except Exception as e:
                     st.error(f"Error al guardar el entrenamiento: {e}")
-
 
 # --- PÁGINA DEL CENTRO DE CONTROL ---
 def page_centro_control():
@@ -310,10 +293,10 @@ def page_centro_control():
 
 # --- ROUTER PRINCIPAL DE LA APLICACIÓN ---
 def main():
-    # Inicializa la base de datos una sola vez
-    if 'db_initialized' not in st.session_state:
-        init_db()
-        st.session_state.db_initialized = True
+    # --- CAMBIO CLAVE ---
+    # Se llama a init_db() en CADA ejecución del script.
+    # Esto asegura que la base de datos y las tablas siempre existan.
+    init_db()
 
     # Selector de página
     if st.session_state.page == 'inicio':

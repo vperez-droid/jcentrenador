@@ -1,0 +1,15 @@
+# Archivos de entorno virtual de Python
+venv/
+.venv/
+__pycache__/
+
+# Bases de datos locales
+*.db
+*.sqlite3
+
+# Archivos de configuración de IDEs
+.vscode/
+.idea/
+
+# Archivos generados por Streamlit
+.streamlit/

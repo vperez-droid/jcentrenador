@@ -1,11 +1,10 @@
 import streamlit as st
-from PIL import Image
-import sqlite3
 import pandas as pd
 import os
-from passlib.context import CryptContext
 import datetime
 import json
+import base64
+from bs4 import BeautifulSoup
 
 # Importaciones para la integración con Google Drive
 from pydrive2.auth import GoogleAuth
@@ -18,17 +17,15 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- INICIALIZACIÓN DE SEGURIDAD Y CONSTANTES ---
-pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
-DB_DIR = "database"
-DB_PATH = os.path.join(DB_DIR, "jct_main.db")
-CREDENTIALS_FILE = "credentials.json" # Archivo para guardar los tokens de OAuth
+# --- CONSTANTES ---
+CREDENTIALS_FILE = "credentials.json"
+MAIN_FOLDER_NAME = "JCT Entrenamientos"
+DRAFT_SUFFIX = ".draft.json"
 
-# --- LÓGICA DE GOOGLE DRIVE (CORREGIDA PARA TU MÉTODO) ---
+# --- LÓGICA DE GOOGLE DRIVE (MODIFICADA Y AMPLIADA) ---
 
-# Leemos los secrets directamente, sin la sección [google_credentials],
-# para que coincida con tu método de configuración.
 try:
+    # Mantenemos tu método de configuración de secrets
     GOOGLE_AUTH_SETTINGS = {
         "client_config_backend": "settings",
         "client_config": {
@@ -47,7 +44,6 @@ except KeyError as e:
     st.error(f"Error: Falta un secreto esencial en la configuración de tu app: {e}")
     st.info("Por favor, ve a 'Manage app' -> 'Secrets' y asegúrate de que todas las claves de Google (client_id, client_secret, etc.) estén definidas.")
     st.stop()
-
 
 def authenticate_gdrive():
     """Realiza la autenticación con Google Drive usando el flujo OAuth 2.0."""
@@ -70,272 +66,285 @@ def authenticate_gdrive():
                 else:
                     st.error("El código no puede estar vacío.")
             st.stop()
-        
+
         elif gauth.access_token_expired:
             gauth.Refresh()
             gauth.SaveCredentialsFile(CREDENTIALS_FILE)
         else:
             gauth.Authorize()
-            
+
         return GoogleDrive(gauth)
-        
+
     except Exception as e:
         st.error(f"Error en la autenticación con Google Drive: {e}")
         st.info("Verifica la configuración de 'Secrets' en Streamlit Cloud.")
         return None
 
-def create_training_file_in_drive(drive, client_name, training_data):
-    """Crea una carpeta para el cliente y guarda el entrenamiento como un archivo .txt."""
+def get_or_create_folder(drive, folder_name, parent_id=None):
+    """Busca una carpeta por nombre. Si no existe, la crea. Devuelve el ID de la carpeta."""
+    query = f"title='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    if parent_id:
+        query += f" and '{parent_id}' in parents"
+
+    file_list = drive.ListFile({'q': query}).GetList()
+    if file_list:
+        return file_list[0]['id']
+    else:
+        folder_metadata = {'title': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
+        if parent_id:
+            folder_metadata['parents'] = [{'id': parent_id}]
+        folder = drive.CreateFile(folder_metadata)
+        folder.Upload()
+        return folder['id']
+
+def list_clients(drive):
+    """Devuelve una lista con los nombres de las carpetas de clientes."""
+    main_folder_id = get_or_create_folder(drive, MAIN_FOLDER_NAME)
+    query = f"'{main_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    client_folders = drive.ListFile({'q': query}).GetList()
+    return sorted([folder['title'] for folder in client_folders])
+
+def create_client(drive, client_name):
+    """Crea una nueva carpeta de cliente."""
+    main_folder_id = get_or_create_folder(drive, MAIN_FOLDER_NAME)
+    get_or_create_folder(drive, client_name, parent_id=main_folder_id)
+
+def list_trainings(drive, client_name):
+    """Devuelve dos listas: una de borradores (.json) y otra de entrenamientos finalizados (.html)."""
+    main_folder_id = get_or_create_folder(drive, MAIN_FOLDER_NAME)
+    client_folder_id = get_or_create_folder(drive, client_name, parent_id=main_folder_id)
+
+    file_list = drive.ListFile({'q': f"'{client_folder_id}' in parents and trashed=false"}).GetList()
+    drafts, finalized = [], []
+    for f in file_list:
+        if f['title'].endswith(DRAFT_SUFFIX):
+            drafts.append(f['title'].replace(DRAFT_SUFFIX, ''))
+        elif f['mimeType'] == 'text/html' or f['title'].endswith('.html'):
+            finalized.append({'title': f['title'], 'alternateLink': f['alternateLink']})
+    return sorted(drafts), sorted(finalized, key=lambda x: x['title'], reverse=True)
+
+def get_draft_data(drive, client_name, draft_name):
+    """Obtiene el contenido de un archivo de borrador y lo devuelve como un diccionario."""
+    main_folder_id = get_or_create_folder(drive, MAIN_FOLDER_NAME)
+    client_folder_id = get_or_create_folder(drive, client_name, parent_id=main_folder_id)
+    file_name = f"{draft_name}{DRAFT_SUFFIX}"
+
+    file_list = drive.ListFile({'q': f"title='{file_name}' and '{client_folder_id}' in parents and trashed=false"}).GetList()
+    return json.loads(file_list[0].GetContentString()) if file_list else {}
+
+def save_draft(drive, client_name, draft_name, data):
+    """Guarda o actualiza un archivo de borrador (.json) en la carpeta del cliente."""
+    main_folder_id = get_or_create_folder(drive, MAIN_FOLDER_NAME)
+    client_folder_id = get_or_create_folder(drive, client_name, parent_id=main_folder_id)
+    file_name = f"{draft_name}{DRAFT_SUFFIX}"
+
+    file_list = drive.ListFile({'q': f"title='{file_name}' and '{client_folder_id}' in parents and trashed=false"}).GetList()
+    draft_file = file_list[0] if file_list else drive.CreateFile({'title': file_name, 'parents': [{'id': client_folder_id}]})
+    draft_file.SetContentString(json.dumps(data, indent=4))
+    draft_file.Upload()
+
+def finalize_training(drive, client_name, training_name, html_content):
+    """Sube el archivo HTML final y elimina el borrador correspondiente."""
+    main_folder_id = get_or_create_folder(drive, MAIN_FOLDER_NAME)
+    client_folder_id = get_or_create_folder(drive, client_name, parent_id=main_folder_id)
+
+    html_file_name = f"{training_name}.html"
+    html_file = drive.CreateFile({'title': html_file_name, 'parents': [{'id': client_folder_id}], 'mimeType': 'text/html'})
+    html_file.SetContentString(html_content, 'utf-8')
+    html_file.Upload()
+
+    draft_file_name = f"{training_name}{DRAFT_SUFFIX}"
+    file_list = drive.ListFile({'q': f"title='{draft_file_name}' and '{client_folder_id}' in parents and trashed=false"}).GetList()
+    if file_list:
+        file_list[0].Delete()
+    return html_file['alternateLink']
+
+# --- LÓGICA DE GENERACIÓN DE HTML ---
+def generate_html_from_template(data, client_name):
+    """Rellena la plantilla HTML con los datos del entrenamiento."""
     try:
-        folder_list = drive.ListFile({'q': "title='JCT Entrenamientos' and mimeType='application/vnd.google-apps.folder' and trashed=false"}).GetList()
-        main_folder_id = folder_list[0]['id'] if folder_list else drive.CreateFile({'title': 'JCT Entrenamientos', 'mimeType': 'application/vnd.google-apps.folder'}).Upload()['id']
+        with open("template.html", "r", encoding="utf-8") as f:
+            soup = BeautifulSoup(f, "html.parser")
 
-        client_folder_list = drive.ListFile({'q': f"title='{client_name}' and '{main_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}).GetList()
-        client_folder_id = client_folder_list[0]['id'] if client_folder_list else drive.CreateFile({'title': client_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [{'id': main_folder_id}]}).Upload()['id']
+        # Función para reemplazar texto de forma segura
+        def replace_content(tag_id, content):
+            element = soup.find(id=tag_id)
+            if element:
+                element.string = content
 
-        file_name = f"Entrenamiento_{training_data['fecha_creacion']}.txt"
-        content = f"""# Entrenamiento para: {client_name}
-# Fecha: {training_data['fecha_creacion']} ({training_data.get('dia_semana', '')})
+        # Rellenar datos
+        replace_content('client_name', client_name)
+        replace_content('training_day', data.get('dia_semana', 'DÍA'))
+        replace_content('training_date', datetime.datetime.fromisoformat(data['fecha_creacion']).strftime('%Y·%m·%d'))
 
-## 🎯 Objetivo de la Sesión
-{training_data.get('objetivo_sesion', 'N/A')}
-
-## 🔥 Warm-Up General
-{training_data.get('warmup_general', 'N/A')}
-
-## ✨ Specific Warm-Up
-{training_data.get('specific_warmup', 'N/A')}
-
-## 🏋️ Fuerza / Weightlifting
-{training_data.get('fuerza', 'N/A')}
-
-## ⚡ Trabajo Específico
-{training_data.get('trabajo_especifico', 'N/A')}
-
-## 🏃 Conditioning
-{training_data.get('conditioning', 'N/A')}
-
-## 📝 Anotaciones del Coach
-{training_data.get('anotaciones_coach', 'N/A')}
-"""
-        training_file = drive.CreateFile({'title': file_name, 'parents': [{'id': client_folder_id}], 'mimeType': 'text/plain'})
-        training_file.SetContentString(content, 'utf-8')
-        training_file.Upload()
-        return training_file['alternateLink']
-
-    except Exception as e:
-        st.error(f"Error al crear el archivo en Google Drive: {e}")
+        # Rellenar áreas de texto, convirtiendo saltos de línea a <br>
+        for key in ['objetivo_sesion', 'warmup_general', 'specific_warmup', 'fuerza', 'trabajo_especifico', 'conditioning', 'anotaciones_coach']:
+            element = soup.find(id=key)
+            if element:
+                element.clear() # Limpia el contenido placeholder
+                element.append(BeautifulSoup(data.get(key, '').replace('\n', '<br/>'), 'html.parser'))
+        
+        return str(soup)
+    except FileNotFoundError:
+        st.error("Error: No se encontró el archivo 'template.html'. Asegúrate de que está en la misma carpeta que app.py.")
         return None
-
-# --- GESTIÓN DE LA BASE DE DATOS (SQLite) ---
-def init_db():
-    os.makedirs(DB_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, nombre TEXT, objetivo TEXT, username TEXT UNIQUE, password_hash TEXT, fecha_registro TEXT)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS entrenamientos (id INTEGER PRIMARY KEY, user_id INTEGER, fecha_creacion TEXT, dia_semana TEXT, objetivo_sesion TEXT, warmup_general TEXT, specific_warmup TEXT, fuerza TEXT, trabajo_especifico TEXT, conditioning TEXT, anotaciones_coach TEXT, FOREIGN KEY (user_id) REFERENCES users (id))')
-    cursor.execute('CREATE TABLE IF NOT EXISTS drafts (user_id INTEGER PRIMARY KEY, draft_data TEXT, last_updated TEXT, FOREIGN KEY (user_id) REFERENCES users (id))')
-    
-    cursor.execute("SELECT COUNT(*) FROM users")
-    if cursor.fetchone()[0] == 0:
-        sample_users = [("Ana García", "Pérdida de peso", "anagarcia", pwd_context.hash("ana2025"), "2025-09-15"), ("Carlos Sánchez", "Ganancia muscular", "csanchez", pwd_context.hash("carlosfit"), "2025-10-05")]
-        cursor.executemany("INSERT INTO users (nombre, objetivo, username, password_hash, fecha_registro) VALUES (?, ?, ?, ?, ?)", sample_users)
-    conn.commit()
-    conn.close()
-
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-# --- LÓGICA DE BORRADORES ---
-def get_draft(user_id):
-    conn = get_db_connection()
-    draft = conn.execute("SELECT draft_data FROM drafts WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return json.loads(draft['draft_data']) if draft else None
-
-def save_draft(user_id, data):
-    conn = get_db_connection()
-    conn.execute("REPLACE INTO drafts (user_id, draft_data, last_updated) VALUES (?, ?, ?)", (user_id, json.dumps(data), datetime.datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def delete_draft(user_id):
-    conn = get_db_connection()
-    conn.execute("DELETE FROM drafts WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    except Exception as e:
+        st.error(f"Error al generar el HTML: {e}")
+        return None
 
 # --- GESTIÓN DE NAVEGACIÓN ---
 if 'page' not in st.session_state:
-    st.session_state.page = 'inicio'
+    st.session_state.page = 'client_selection'
 
-def set_page(page):
-    st.session_state.page = page
+def set_page(page_name):
+    st.session_state.page = page_name
 
-# --- DEFINICIÓN DE PÁGINAS ---
-def page_inicio():
-    col1, col2, col3 = st.columns([2, 3, 2])
-    with col2:
-        st.title("Panel de Entrenador - JCT")
-        try:
-            st.image('assets/jct.jpeg', use_column_width=True)
-        except Exception:
-            st.warning("Logo no encontrado en 'assets/jct.jpeg'.")
-    st.write("---")
-    st.header("Selecciona una opción")
-    c1, c2, c3, c4 = st.columns(4, gap="large")
-    c1.button("👤 Registrar Cliente", use_container_width=True, on_click=set_page, args=['registrar'])
-    c2.button("📋 Ver Clientes", use_container_width=True, on_click=set_page, args=['ver_clientes'])
-    c3.button("💪 Crear Entrenamiento", use_container_width=True, on_click=set_page, args=['crear_entrenamiento'])
-    c4.button("📊 Centro de Control", use_container_width=True, on_click=set_page, args=['centro_control'])
+# --- DEFINICIÓN DE PÁGINAS (NUEVA ESTRUCTURA) ---
 
-def page_registrar():
-    if st.button("⬅️ Volver al inicio"): set_page('inicio'); st.rerun()
-    st.title("👤 Formulario de Creación de Cliente")
-    with st.form("crear_cliente_form", clear_on_submit=True):
-        nombre = st.text_input("Nombre completo *")
-        objetivo = st.selectbox("Objetivo principal", ["Recomposición corporal", "Fuerza", "Pérdida de peso", "Ganancia muscular", "Otro"])
-        username = st.text_input("Nombre de Usuario *")
-        password = st.text_input("Contraseña *", type="password")
-        if st.form_submit_button("✅ Crear Cliente"):
-            if all([nombre, username, password]):
-                try:
-                    conn = get_db_connection()
-                    conn.execute("INSERT INTO users (nombre, objetivo, username, password_hash, fecha_registro) VALUES (?, ?, ?, ?, ?)", (nombre, objetivo, username, pwd_context.hash(password), datetime.date.today().isoformat()))
-                    conn.commit(); conn.close()
-                    st.success(f"¡Cliente '{nombre}' creado!")
-                except sqlite3.IntegrityError:
-                    st.error(f"El usuario '{username}' ya existe.")
-            else:
-                st.warning("Los campos con * son obligatorios.")
+def page_client_selection():
+    """Página para ver la lista de clientes (carpetas) y crear nuevos."""
+    st.title("Panel de Entrenador - Clientes en Google Drive")
+    st.markdown("---")
 
-def page_ver_clientes():
-    if st.button("⬅️ Volver al inicio"): set_page('inicio'); st.rerun()
-    st.title("📋 Lista de Clientes Registrados")
-    conn = get_db_connection()
-    clientes_df = pd.read_sql_query("SELECT id, nombre, username, objetivo, fecha_registro FROM users", conn)
-    if not clientes_df.empty:
-        st.dataframe(clientes_df, use_container_width=True, hide_index=True)
-        st.subheader("Ver Entrenamientos por Cliente")
-        cliente_sel = st.selectbox("Elige un cliente", options=clientes_df['nombre'], index=None, placeholder="Selecciona...")
-        if cliente_sel:
-            user_id = clientes_df[clientes_df['nombre'] == cliente_sel]['id'].iloc[0]
-            entrenamientos_df = pd.read_sql_query(f"SELECT fecha_creacion, dia_semana, objetivo_sesion FROM entrenamientos WHERE user_id = {user_id} ORDER BY fecha_creacion DESC", conn)
-            if not entrenamientos_df.empty:
-                st.write(f"**Historial de {cliente_sel}:**")
-                st.dataframe(entrenamientos_df, use_container_width=True, hide_index=True)
-            else:
-                st.info(f"{cliente_sel} aún no tiene entrenamientos.")
+    with st.spinner("Cargando clientes desde Google Drive..."):
+        clients = list_clients(st.session_state.drive)
+
+    if not clients:
+        st.info("Aún no has creado ningún cliente. Los clientes son carpetas en Google Drive.")
     else:
-        st.info("Aún no hay clientes registrados.")
-    conn.close()
-    
-def page_crear_entrenamiento():
-    if st.button("⬅️ Volver al inicio"):
-        for key in list(st.session_state.keys()):
-            if key.startswith('wizard_'): del st.session_state[key]
-        set_page('inicio'); st.rerun()
-
-    st.title("💪 Creador de Sesiones de Entrenamiento")
-
-    if 'wizard_step' not in st.session_state: st.session_state.wizard_step = 1
-
-    if st.session_state.wizard_step == 1:
-        st.subheader("Paso 1: Cliente y Fecha")
-        conn = get_db_connection()
-        clientes = pd.read_sql_query("SELECT id, nombre FROM users", conn); conn.close()
-        if clientes.empty: st.warning("No hay clientes registrados."); return
-
-        cliente_id = st.selectbox("Selecciona el cliente", clientes['id'], format_func=lambda x: clientes.loc[clientes['id'] == x, 'nombre'].iloc[0])
-        
-        draft = get_draft(cliente_id)
-        if draft:
-            st.info("Se ha encontrado un borrador para este cliente.")
-            c1, c2 = st.columns(2)
-            if c1.button("Continuar borrador", use_container_width=True):
-                st.session_state.wizard_data = draft; st.session_state.wizard_step = 2; st.rerun()
-            if c2.button("Empezar de cero", type="primary", use_container_width=True):
-                delete_draft(cliente_id); st.session_state.wizard_data = {}; st.rerun()
-        
-        if 'wizard_data' not in st.session_state: st.session_state.wizard_data = {}
-        
-        data = st.session_state.wizard_data
-        data['user_id'] = cliente_id
-        data['client_name'] = clientes.loc[clientes['id'] == cliente_id, 'nombre'].iloc[0]
-        
-        try: date_val = datetime.datetime.fromisoformat(data['fecha_creacion']).date()
-        except: date_val = datetime.date.today()
-        
-        data['fecha_creacion'] = st.date_input("Fecha de la sesión", value=date_val).isoformat()
-        data['dia_semana'] = st.text_input("Día (Ej: LUNES 6)", value=data.get('dia_semana', ''))
-        
-        if st.button("Siguiente ➡️"): st.session_state.wizard_step = 2; st.rerun()
-
-    elif st.session_state.wizard_step == 2:
-        data = st.session_state.wizard_data
-        st.subheader(f"Paso 2: Contenido para {data.get('client_name', '')}")
-        
-        with st.container(border=True):
-            data['objetivo_sesion'] = st.text_area("🎯 Objetivo", value=data.get('objetivo_sesion', ''), height=100)
-            data['warmup_general'] = st.text_area("🔥 Warm-Up General", value=data.get('warmup_general', ''), height=150)
-            data['specific_warmup'] = st.text_area("✨ Specific Warm-Up", value=data.get('specific_warmup', ''), height=100)
-            data['fuerza'] = st.text_area("🏋️ Fuerza", value=data.get('fuerza', ''), height=150)
-            data['trabajo_especifico'] = st.text_area("⚡ Trabajo Específico", value=data.get('trabajo_especifico', ''), height=150)
-            data['conditioning'] = st.text_area("🏃 Conditioning", value=data.get('conditioning', ''), height=150)
-            data['anotaciones_coach'] = st.text_area("📝 Anotaciones", value=data.get('anotaciones_coach', ''), height=100)
-
-        c1, c2, c3 = st.columns([1, 1, 2])
-        if c1.button("⬅️ Anterior"): st.session_state.wizard_step = 1; st.rerun()
-        if c2.button("💾 Guardar Borrador"): save_draft(data['user_id'], data); st.toast("¡Borrador guardado!")
-        if c3.button("✅ Finalizar y Guardar en Drive", type="primary", use_container_width=True):
-            try:
-                conn = get_db_connection()
-                conn.execute("INSERT INTO entrenamientos (user_id, fecha_creacion, dia_semana, objetivo_sesion, warmup_general, specific_warmup, fuerza, trabajo_especifico, conditioning, anotaciones_coach) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (data['user_id'], data['fecha_creacion'], data.get('dia_semana'), data.get('objetivo_sesion'), data.get('warmup_general'), data.get('specific_warmup'), data.get('fuerza'), data.get('trabajo_especifico'), data.get('conditioning'), data.get('anotaciones_coach')))
-                conn.commit(); conn.close()
-                st.success("Entrenamiento guardado en la base de datos local.")
-
-                with st.spinner("Conectando con Google Drive y guardando archivo..."):
-                    drive = authenticate_gdrive()
-                    if drive:
-                        link = create_training_file_in_drive(drive, data['client_name'], data)
-                        if link: st.success(f"¡Entrenamiento guardado en Google Drive! [Ver archivo]({link})", icon="✅")
-                
-                delete_draft(data['user_id'])
-                st.balloons()
-                # Limpiar estado para el próximo entrenamiento
-                for key in list(st.session_state.keys()):
-                    if key.startswith('wizard_'): del st.session_state[key]
-                set_page('inicio')
+        st.subheader("Selecciona un cliente:")
+        cols = st.columns(4)
+        for i, client in enumerate(clients):
+            if cols[i % 4].button(client, key=f"client_{client}", use_container_width=True):
+                st.session_state.selected_client = client
+                set_page('training_list')
                 st.rerun()
-                
-            except Exception as e: st.error(f"Error al guardar: {e}")
 
-def page_centro_control():
-    if st.button("⬅️ Volver al inicio"): set_page('inicio'); st.rerun()
-    st.title("📊 Centro de Control")
-    conn = get_db_connection()
-    df_users = pd.read_sql_query("SELECT fecha_registro FROM users", conn); conn.close()
-    total_clientes = len(df_users)
-    mes_top = "N/A"
-    if not df_users.empty:
-        df_users['fecha_registro'] = pd.to_datetime(df_users['fecha_registro'])
-        mes_top = df_users['fecha_registro'].dt.to_period('M').value_counts().idxmax().strftime('%B %Y').capitalize()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Clientes Actuales", f"{total_clientes}")
-    c2.metric("Total Histórico", f"{total_clientes}")
-    c3.metric("Mes con más altas", mes_top)
-    st.write("---"); st.subheader("Más datos y gráficos próximamente...")
+    st.markdown("---")
+    with st.expander("➕ Crear un nuevo cliente"):
+        with st.form("new_client_form"):
+            new_client_name = st.text_input("Nombre del nuevo cliente (se creará una carpeta):")
+            if st.form_submit_button("Crear Cliente"):
+                if new_client_name and new_client_name not in clients:
+                    with st.spinner(f"Creando carpeta para '{new_client_name}'..."):
+                        create_client(st.session_state.drive, new_client_name)
+                    st.success(f"¡Cliente '{new_client_name}' creado!")
+                    st.rerun()
+                else:
+                    st.warning("El nombre no puede estar vacío o ya existe.")
+
+def page_training_list():
+    """Página para ver los entrenamientos (borradores y finalizados) de un cliente."""
+    client_name = st.session_state.selected_client
+    
+    if st.button("⬅️ Volver a la lista de clientes"):
+        set_page('client_selection')
+        st.rerun()
+
+    st.title(f"Entrenamientos para: {client_name}")
+
+    with st.spinner("Cargando entrenamientos..."):
+        drafts, finalized = list_trainings(st.session_state.drive, client_name)
+
+    if st.button("➕ Crear Nuevo Entrenamiento", type="primary", use_container_width=True):
+        st.session_state.training_name = f"Entrenamiento {datetime.date.today().isoformat()}"
+        st.session_state.training_data = {'fecha_creacion': datetime.date.today().isoformat()}
+        set_page('training_editor')
+        st.rerun()
+
+    st.markdown("---")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("✏️ Borradores (A medias)")
+        if not drafts:
+            st.info("No hay borradores.")
+        else:
+            for draft_name in drafts:
+                if st.button(f"Continuar '{draft_name}'", key=f"edit_{draft_name}", use_container_width=True):
+                    with st.spinner("Cargando borrador..."):
+                        st.session_state.training_data = get_draft_data(st.session_state.drive, client_name, draft_name)
+                        st.session_state.training_name = draft_name
+                    set_page('training_editor')
+                    st.rerun()
+    
+    with col2:
+        st.subheader("✅ Entrenamientos Finalizados")
+        if not finalized:
+            st.info("No hay entrenamientos finalizados.")
+        else:
+            for final_file in finalized:
+                st.markdown(f"📄 [{final_file['title']}]({final_file['alternateLink']})")
+
+def page_training_editor():
+    """Página para crear o editar un entrenamiento."""
+    client_name = st.session_state.selected_client
+    
+    if st.button(f"⬅️ Volver a los entrenamientos de {client_name}"):
+        set_page('training_list')
+        st.rerun()
+
+    st.title(f"Editando entrenamiento para: {client_name}")
+    data = st.session_state.get('training_data', {})
+
+    st.session_state.training_name = st.text_input("Nombre del archivo (sin extensión):", st.session_state.get('training_name', ''))
+    
+    c1, c2 = st.columns(2)
+    current_date = datetime.datetime.fromisoformat(data.get('fecha_creacion', datetime.date.today().isoformat())).date()
+    data['fecha_creacion'] = c1.date_input("Fecha de la sesión", value=current_date).isoformat()
+    data['dia_semana'] = c2.text_input("Día (Ej: LUNES 6)", value=data.get('dia_semana', ''))
+
+    st.markdown("---")
+    data['objetivo_sesion'] = st.text_area("🎯 Objetivo", value=data.get('objetivo_sesion', ''), height=100)
+    data['warmup_general'] = st.text_area("🔥 Warm-Up General", value=data.get('warmup_general', ''), height=150)
+    data['specific_warmup'] = st.text_area("✨ Specific Warm-Up", value=data.get('specific_warmup', ''), height=100)
+    data['fuerza'] = st.text_area("🏋️ Fuerza", value=data.get('fuerza', ''), height=150)
+    data['trabajo_especifico'] = st.text_area("⚡ Trabajo Específico", value=data.get('trabajo_especifico', ''), height=150)
+    data['conditioning'] = st.text_area("🏃 Conditioning", value=data.get('conditioning', ''), height=150)
+    data['anotaciones_coach'] = st.text_area("📝 Anotaciones", value=data.get('anotaciones_coach', ''), height=100)
+
+    st.session_state.training_data = data
+    st.markdown("---")
+
+    b1, b2 = st.columns([1, 2])
+    if b1.button("💾 Guardar Borrador", use_container_width=True):
+        if st.session_state.training_name:
+            with st.spinner("Guardando borrador en Google Drive..."):
+                save_draft(st.session_state.drive, client_name, st.session_state.training_name, data)
+            st.toast("¡Borrador guardado!", icon="💾")
+        else:
+            st.warning("El nombre del archivo no puede estar vacío.")
+
+    if b2.button("✅ Finalizar y Generar HTML", type="primary", use_container_width=True):
+        if st.session_state.training_name:
+            final_html = generate_html_from_template(data, client_name)
+            if final_html:
+                with st.spinner("Subiendo HTML a Google Drive..."):
+                    file_link = finalize_training(st.session_state.drive, client_name, st.session_state.training_name, final_html)
+                
+                st.success(f"¡Entrenamiento finalizado! [Ver en Google Drive]({file_link})")
+                b64 = base64.b64encode(final_html.encode('utf-8')).decode()
+                st.markdown(f'<a href="data:file/html;base64,{b64}" download="{st.session_state.training_name}.html" class="button">📥 Descargar HTML</a>', unsafe_allow_html=True)
+                st.balloons()
+        else:
+            st.warning("El nombre del archivo no puede estar vacío para finalizar.")
 
 # --- ROUTER PRINCIPAL DE LA APLICACIÓN ---
 def main():
-    init_db() # Asegura que la DB siempre esté lista
-    pages = {
-        'inicio': page_inicio, 'registrar': page_registrar, 'ver_clientes': page_ver_clientes,
-        'crear_entrenamiento': page_crear_entrenamiento, 'centro_control': page_centro_control,
-    }
-    pages.get(st.session_state.page, page_inicio)() # Ejecuta la página actual
+    st.sidebar.title("JCT Training Panel")
+    # Autenticamos al inicio y guardamos el objeto 'drive' en la sesión
+    if 'drive' not in st.session_state:
+        st.session_state.drive = authenticate_gdrive()
+    
+    # Si la autenticación es exitosa, mostramos la app
+    if st.session_state.drive:
+        pages = {
+            'client_selection': page_client_selection,
+            'training_list': page_training_list,
+            'training_editor': page_training_editor,
+        }
+        # Ejecuta la función de la página actual
+        pages.get(st.session_state.page, page_client_selection)()
 
 if __name__ == "__main__":
     main()

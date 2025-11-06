@@ -24,31 +24,35 @@ DB_DIR = "database"
 DB_PATH = os.path.join(DB_DIR, "jct_main.db")
 CREDENTIALS_FILE = "credentials.json" # Archivo para guardar los tokens de OAuth
 
-# --- LÓGICA DE GOOGLE DRIVE (INTEGRADA) ---
+# --- LÓGICA DE GOOGLE DRIVE (CORREGIDA PARA TU MÉTODO) ---
 
-# Configuración de autenticación de Google Drive usando los secrets de Streamlit
-# Asegúrate de haber configurado estos secrets en tu app de Streamlit Cloud
-GOOGLE_AUTH_SETTINGS = {
-    "client_config_backend": "settings",
-    "client_config": {
-        "web": {
-            "client_id": st.secrets.google_credentials.client_id,
-            "client_secret": st.secrets.google_credentials.client_secret,
-            "project_id": st.secrets.google_credentials.project_id,
-            "auth_uri": st.secrets.google_credentials.auth_uri,
-            "token_uri": st.secrets.google_credentials.token_uri,
-            "auth_provider_x509_cert_url": st.secrets.google_credentials.auth_provider_x509_cert_url,
-            "redirect_uris": st.secrets.google_credentials.redirect_uris
-        }
-    },
-    "oauth_scope": ["https://www.googleapis.com/auth/drive"]
-}
+# Leemos los secrets directamente, sin la sección [google_credentials],
+# para que coincida con tu método de configuración.
+try:
+    GOOGLE_AUTH_SETTINGS = {
+        "client_config_backend": "settings",
+        "client_config": {
+            "web": {
+                "client_id": st.secrets["client_id"],
+                "client_secret": st.secrets["client_secret"],
+                "auth_uri": st.secrets["auth_uri"],
+                "token_uri": st.secrets["token_uri"],
+                "auth_provider_x509_cert_url": st.secrets["auth_provider_x509_cert_url"],
+                "redirect_uris": st.secrets["redirect_uris"]
+            }
+        },
+        "oauth_scope": ["https://www.googleapis.com/auth/drive"]
+    }
+except KeyError as e:
+    st.error(f"Error: Falta un secreto esencial en la configuración de tu app: {e}")
+    st.info("Por favor, ve a 'Manage app' -> 'Secrets' y asegúrate de que todas las claves de Google (client_id, client_secret, etc.) estén definidas.")
+    st.stop()
+
 
 def authenticate_gdrive():
     """Realiza la autenticación con Google Drive usando el flujo OAuth 2.0."""
     try:
         gauth = GoogleAuth(settings=GOOGLE_AUTH_SETTINGS)
-        
         if os.path.exists(CREDENTIALS_FILE):
             gauth.LoadCredentialsFile(CREDENTIALS_FILE)
 
@@ -56,7 +60,6 @@ def authenticate_gdrive():
             st.warning("Se necesita autorización para acceder a Google Drive.")
             auth_url = gauth.GetAuthUrl()
             st.markdown(f"**1. Haz clic aquí para autorizar:** [Enlace de Autorización de Google]({auth_url})", unsafe_allow_html=True)
-            
             code = st.text_input("2. Pega el código de autorización que recibiste aquí:")
             if st.button("Autorizar App"):
                 if code:
@@ -67,7 +70,7 @@ def authenticate_gdrive():
                 else:
                     st.error("El código no puede estar vacío.")
             st.stop()
-            
+        
         elif gauth.access_token_expired:
             gauth.Refresh()
             gauth.SaveCredentialsFile(CREDENTIALS_FILE)
@@ -78,21 +81,18 @@ def authenticate_gdrive():
         
     except Exception as e:
         st.error(f"Error en la autenticación con Google Drive: {e}")
-        st.info("Asegúrate de haber configurado los 'Secrets' en Streamlit Cloud correctamente.")
+        st.info("Verifica la configuración de 'Secrets' en Streamlit Cloud.")
         return None
 
 def create_training_file_in_drive(drive, client_name, training_data):
     """Crea una carpeta para el cliente y guarda el entrenamiento como un archivo .txt."""
     try:
-        # Busca o crea la carpeta principal "JCT Entrenamientos"
         folder_list = drive.ListFile({'q': "title='JCT Entrenamientos' and mimeType='application/vnd.google-apps.folder' and trashed=false"}).GetList()
         main_folder_id = folder_list[0]['id'] if folder_list else drive.CreateFile({'title': 'JCT Entrenamientos', 'mimeType': 'application/vnd.google-apps.folder'}).Upload()['id']
 
-        # Busca o crea la carpeta del cliente
         client_folder_list = drive.ListFile({'q': f"title='{client_name}' and '{main_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}).GetList()
         client_folder_id = client_folder_list[0]['id'] if client_folder_list else drive.CreateFile({'title': client_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [{'id': main_folder_id}]}).Upload()['id']
 
-        # Prepara el contenido del archivo
         file_name = f"Entrenamiento_{training_data['fecha_creacion']}.txt"
         content = f"""# Entrenamiento para: {client_name}
 # Fecha: {training_data['fecha_creacion']} ({training_data.get('dia_semana', '')})
@@ -118,7 +118,6 @@ def create_training_file_in_drive(drive, client_name, training_data):
 ## 📝 Anotaciones del Coach
 {training_data.get('anotaciones_coach', 'N/A')}
 """
-        # Sube el archivo
         training_file = drive.CreateFile({'title': file_name, 'parents': [{'id': client_folder_id}], 'mimeType': 'text/plain'})
         training_file.SetContentString(content, 'utf-8')
         training_file.Upload()

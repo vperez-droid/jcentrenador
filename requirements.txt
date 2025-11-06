@@ -4,4 +4,3 @@ Pillow
 passlib
 argon2-cffi
 PyDrive2
-BeautifulSoup
